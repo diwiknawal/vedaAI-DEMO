@@ -1,0 +1,98 @@
+# docker-compose.yaml — optimized for 8GB RAM
+
+services:
+  # ── MinIO — local S3-compatible object storage ──────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: veda_minio
+    command: server /data --console-address ":9001"
+    mem_limit: 512m
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"    # S3 API
+      - "9001:9001"    # MinIO Console (UI)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis — Celery broker + result backend ───────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: veda_redis
+    mem_limit: 128m
+    command: redis-server --maxmemory 100mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ── FastAPI Backend ──────────────────────────────────────────────
+  backend:
+    build: ./backend
+    container_name: veda_backend
+    mem_limit: 512m
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+      MINIO_ENDPOINT: minio:9000
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:///./veda.db
+    ports:
+      - "8000:8000"
+    depends_on:
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /tmp/veda:/tmp/veda    # shared scratch dir for FFmpeg
+    restart: unless-stopped
+
+  # ── Celery Worker ────────────────────────────────────────────────
+  worker:
+    build: ./backend
+    container_name: veda_worker
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=1
+    mem_limit: 2g
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+      MINIO_ENDPOINT: minio:9000
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:///./veda.db
+    depends_on:
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /tmp/veda:/tmp/veda
+    restart: unless-stopped
+
+  # ── React Frontend ───────────────────────────────────────────────
+  frontend:
+    build: ./frontend
+    container_name: veda_frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://backend:8000
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+volumes:
+  minio_data:

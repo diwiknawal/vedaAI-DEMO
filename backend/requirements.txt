@@ -1,0 +1,36 @@
+# FastAPI + Server
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+
+# Async Task Queue
+celery==5.4.0
+redis==5.0.4
+
+# Database
+sqlalchemy==2.0.30
+alembic==1.13.1
+
+# Video Processing
+scenedetect[opencv]==0.6.4
+
+# Transcription — faster-whisper uses CTranslate2 (no PyTorch, ~200MB vs 2GB+)
+# Perfect for 8GB RAM machines. Models: tiny, base, small, medium
+faster-whisper==1.1.0
+
+# AI / LLM (Gemini)
+google-generativeai==0.7.2
+
+# Storage — MinIO / S3-compatible
+boto3==1.34.120
+botocore==1.34.120
+
+# Utilities
+python-dotenv==1.0.1
+pydantic==2.7.1
+pydantic-settings==2.3.0
+aiofiles==23.2.1
+httpx==0.27.0
+
+# Type hints
+typing-extensions==4.12.2
