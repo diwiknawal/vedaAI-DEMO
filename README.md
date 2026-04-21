@@ -95,3 +95,4 @@ Key settings in `.env`:
 | `CLIP_MIN_DURATION` | `20` | Min clip length in seconds |
 | `CLIP_MAX_DURATION` | `30` | Max clip length in seconds |
 | `MINIO_*` | See `.env.example` | Object storage config |
+# vedaAI-DEMO
