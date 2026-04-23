@@ -1,12 +1,11 @@
 """
 Pipeline Stage 6 — AI Scene Suggestions
-Uses Gemini to generate editorial suggestions for each clip:
-b-roll prompts, hook text, transition type, text overlays.
-Stores suggestions as JSON on the Clip DB record.
+Uses either Gemini or Local LLM (Ollama) to generate editorial suggestions for each clip.
 """
 import json
 import logging
 import re
+import httpx
 
 import google.generativeai as genai
 
@@ -48,11 +47,7 @@ def run_ai_suggestions(ctx: dict) -> dict:
     if not clip_ids:
         return ctx
 
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-
     from models import Clip, Scene
-
     clips = db.query(Clip).filter(Clip.id.in_(clip_ids)).all()
 
     for clip in clips:
@@ -65,47 +60,67 @@ def run_ai_suggestions(ctx: dict) -> dict:
                     transcript = seg_data.get("text", scene.transcript_segment)
                 except (json.JSONDecodeError, AttributeError):
                     transcript = scene.transcript_segment or ""
-            if not settings.gemini_api_key or settings.gemini_api_key == "your_gemini_api_key_here":
-                raise ValueError("No valid Gemini API key provided")
 
-            prompt = SUGGESTION_PROMPT.format(
-                platform=clip.platform,
-                duration=clip.duration_sec or 25.0,
-                score=clip.virality_score or 0,
-                transcript=transcript[:1000],
-            )
+            suggestions = None
+            
+            # --- Path A: Local LLM (Ollama) ---
+            if settings.use_local_llm:
+                try:
+                    payload = {
+                        "model": settings.llm_model,
+                        "prompt": SUGGESTION_PROMPT.format(
+                            platform=clip.platform,
+                            duration=clip.duration_sec or 25.0,
+                            score=clip.virality_score or 0,
+                            transcript=transcript[:1000]
+                        ),
+                        "stream": False,
+                        "format": "json"
+                    }
+                    resp = httpx.post(f"{settings.ollama_base_url}/api/generate", json=payload, timeout=60.0)
+                    resp.raise_for_status()
+                    raw_response = resp.json().get("response", "{}")
+                    suggestions = _parse_json(raw_response)
+                    logger.info(f"[ai_suggestions] clip {clip.id} suggested via Local LLM")
+                except Exception as e:
+                    logger.error(f"[ai_suggestions] Local LLM failed: {e}")
+                    raise e
 
-            response = model.generate_content(prompt)
-            suggestions = _parse_json(response.text)
-            clip.ai_suggestions = suggestions
-            db.commit()
-            logger.debug(f"[ai_suggestions] clip={clip.id} platform={clip.platform} ✓")
+            # --- Path B: Gemini (Cloud API) ---
+            elif settings.gemini_api_key and settings.gemini_api_key != "your_gemini_api_key_here":
+                genai.configure(api_key=settings.gemini_api_key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                prompt = SUGGESTION_PROMPT.format(
+                    platform=clip.platform,
+                    duration=clip.duration_sec or 25.0,
+                    score=clip.virality_score or 0,
+                    transcript=transcript[:1000]
+                )
+                response = model.generate_content(prompt)
+                suggestions = _parse_json(response.text)
+                logger.info(f"[ai_suggestions] clip {clip.id} suggested via Gemini")
+
+            else:
+                raise ValueError("No valid AI provider configured")
+
+            if suggestions:
+                clip.ai_suggestions = suggestions
+                db.commit()
 
         except Exception as e:
-            logger.warning(f"[ai_suggestions] clip {clip.id} Gemini failed ({e}), falling back to open-source heuristic algorithm")
-            
-            # --- OPEN SOURCE HEURISTIC FALLBACK (No API needed) ---
-            # Generate generic but useful metadata based on what we have
-            fallback_suggestions = {
-              "hook_text": f"Wait for the end... 🔥",
-              "suggested_title": f"Viral {clip.platform.title()} Clip",
-              "text_overlays": [
-                {"time": 0, "text": "Watch this!", "style": "title"},
-                {"time": int((clip.duration_sec or 10)/2), "text": "Wait for it...", "style": "caption"}
-              ],
-              "broll_prompts": [
-                "Cinematic establishing shot",
-                "Dynamic reaction shot"
-              ],
-              "transition": "zoom_in",
-              "music_mood": "energetic",
-              "cta": "Follow for more!"
+            logger.warning(f"[ai_suggestions] clip {clip.id} AI failed ({e}), falling back to heuristic")
+            fallback = {
+                "hook_text": "Wait for the end... 🔥",
+                "suggested_title": f"Viral {clip.platform.title()} Clip",
+                "text_overlays": [{"time": 0, "text": "Watch this!", "style": "title"}],
+                "broll_prompts": ["Cinematic establishing shot"],
+                "transition": "zoom_in",
+                "music_mood": "energetic",
+                "cta": "Follow for more!"
             }
-            
-            clip.ai_suggestions = fallback_suggestions
+            clip.ai_suggestions = fallback
             db.commit()
 
-    logger.info(f"[ai_suggestions] job={job_id} clips_enriched={len(clips)}")
     return ctx
 
 
@@ -119,8 +134,6 @@ def _parse_json(text: str) -> dict:
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
-            try:
-                return json.loads(m.group())
-            except Exception:
-                pass
+            try: return json.loads(m.group())
+            except: pass
     return {}

@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     # ── LLM ──────────────────────────────────────────────────────────
     gemini_api_key: str = ""
     openai_api_key: str = ""
+    use_local_llm: bool = False
+    ollama_base_url: str = "http://localhost:11434"
+    llm_model: str = "qwen2:1.5b"
 
     # ── Whisper ───────────────────────────────────────────────────────
     whisper_model: str = "base"          # tiny / base / small / medium / large
@@ -19,6 +22,7 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "veda-videos"
     minio_secure: bool = False
+    minio_public_url: str = ""
 
     # ── Temp scratch dir (FFmpeg working space) ───────────────────────
     temp_dir: str = "/tmp/veda"

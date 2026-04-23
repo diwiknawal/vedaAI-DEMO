@@ -24,16 +24,20 @@ PLATFORMS = ["tiktok", "reels", "shorts"]
 # Output resolution: 1080x1920 (9:16 vertical)
 OUT_W, OUT_H = 1080, 1920
 
-# OpenCV Haar cascade path (bundled with opencv-python-headless)
-_CASCADE_PATH = str(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-_face_cascade = None
+# OpenCV Haar cascade paths
+_CASCADES = {
+    "frontal": str(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"),
+    "profile": str(cv2.data.haarcascades + "haarcascade_profileface.xml"),
+    "upperbody": str(cv2.data.haarcascades + "haarcascade_upperbody.xml"),
+}
+_loaded_cascades = {}
 
 
-def _get_cascade():
-    global _face_cascade
-    if _face_cascade is None:
-        _face_cascade = cv2.CascadeClassifier(_CASCADE_PATH)
-    return _face_cascade
+def _get_cascade(name: str):
+    global _loaded_cascades
+    if name not in _loaded_cascades:
+        _loaded_cascades[name] = cv2.CascadeClassifier(_CASCADES[name])
+    return _loaded_cascades[name]
 
 
 def run_reframe(ctx: dict) -> dict:
@@ -102,55 +106,77 @@ def run_reframe(ctx: dict) -> dict:
 
 def _compute_crop_box(video_path: Path, start_sec: float, end_sec: float):
     """
-    Sample up to 5 frames, run OpenCV Haar cascade face detection,
-    return (x, y, w, h) crop box in source coords for 9:16 output.
-    Falls back to center crop if no face found.
+    Sample 15 frames, run multi-stage detection (Frontal -> Profile -> UpperBody),
+    with a Motion-Detection fallback to center on movement.
     """
     cap = cv2.VideoCapture(str(video_path))
     vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    sample_times = np.linspace(start_sec + 1.0, end_sec - 1.0, num=5)
-    face_centers_x = []
-    cascade = _get_cascade()
-
+    
+    # Increase sampling density for better accuracy
+    sample_times = np.linspace(start_sec + 0.5, end_sec - 0.5, num=15)
+    points_of_interest_x = []
+    
+    prev_gray = None
+    scale = vid_w / 320
+    
     for t in sample_times:
         cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
         ret, frame = cap.read()
         if not ret:
             continue
-        # Shrink frame for faster detection (saves RAM/CPU)
+            
+        # 1. Human Feature Detection
         small = cv2.resize(frame, (320, int(320 * vid_h / vid_w)))
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30)
-        )
-        if len(faces) > 0:
-            # Largest face by area
-            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-            # Scale back to original resolution
-            scale = vid_w / 320
-            center_x = (x + w / 2) * scale
-            face_centers_x.append(center_x)
+        
+        found_x = None
+        
+        # Try Frontal -> Profile -> UpperBody
+        for stage in ["frontal", "profile", "upperbody"]:
+            cascade = _get_cascade(stage)
+            objs = cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30))
+            if len(objs) > 0:
+                # Prioritize largest object
+                x, y, w, h = max(objs, key=lambda o: o[2] * o[3])
+                found_x = (x + w / 2) * scale
+                break
+        
+        if found_x is not None:
+            points_of_interest_x.append(found_x)
+        
+        # 2. Motion Detection Fallback (if no human found yet)
+        elif prev_gray is not None:
+            diff = cv2.absdiff(prev_gray, gray)
+            _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+            moments = cv2.moments(thresh)
+            if moments["m00"] > 500: # Significant movement
+                motion_x = (moments["m10"] / moments["m00"]) * scale
+                points_of_interest_x.append(motion_x)
+                
+        prev_gray = gray
 
     cap.release()
 
-    # Determine 9:16 crop dimensions in source video
+    # Determine 9:16 crop dimensions
     crop_h = vid_h
     crop_w = int(crop_h * OUT_W / OUT_H)
 
     if crop_w > vid_w:
-        # Video is narrower than 9:16 — use full width
         crop_w = vid_w
         crop_h = int(crop_w * OUT_H / OUT_W)
 
-    # Horizontal center: face-tracked or center fallback
-    if face_centers_x:
-        avg_center_x = int(np.mean(face_centers_x))
+    # Robust centering: use Median X to ignore outliers
+    if points_of_interest_x:
+        avg_center_x = int(np.median(points_of_interest_x))
     else:
         avg_center_x = vid_w // 2
 
-    crop_x = max(0, min(avg_center_x - crop_w // 2, vid_w - crop_w))
+    # Smooth the center toward the middle slightly if it's too extreme
+    # (prevents cutting off side-profile speakers too aggressively)
+    actual_center_x = int(0.8 * avg_center_x + 0.2 * (vid_w // 2))
+
+    crop_x = max(0, min(actual_center_x - crop_w // 2, vid_w - crop_w))
     crop_y = max(0, (vid_h - crop_h) // 2)
 
     return crop_x, crop_y, crop_w, crop_h

@@ -1,11 +1,12 @@
 """
 Pipeline Stage 4 — Virality Score
-Uses Gemini Flash to score each scene's viral potential (0-100).
+Uses either Gemini Flash or Local LLM (Ollama) to score each scene's viral potential (0-100).
 Selects top scenes above the virality threshold for clipping.
 """
 import json
 import logging
 import re
+import httpx
 
 import google.generativeai as genai
 
@@ -47,107 +48,105 @@ def run_virality_score(ctx: dict) -> dict:
         logger.warning(f"[virality] job={job_id} no scenes to score")
         return {**ctx, "selected_scene_ids": []}
 
-    # ── Configure Gemini ──────────────────────────────────────────────
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-
     scored = []
     for scene in scenes:
         transcript = (scene.transcript_segment or "").strip()
         if not transcript:
-            # No speech — heuristic score based on duration
             score = 40 if 20 <= scene.duration_sec <= 35 else 20
             scene.virality_score = score
-            scene.motion_score = None
             db.commit()
             scored.append((scene, score))
             continue
 
         try:
-            if not settings.gemini_api_key or settings.gemini_api_key == "your_gemini_api_key_here":
-                raise ValueError("No valid Gemini API key provided")
+            result = None
+            
+            # --- Path A: Local LLM (Ollama) ---
+            if settings.use_local_llm:
+                try:
+                    payload = {
+                        "model": settings.llm_model,
+                        "prompt": SCORE_PROMPT.format(duration=scene.duration_sec, transcript=transcript[:1500]),
+                        "stream": False,
+                        "format": "json"
+                    }
+                    resp = httpx.post(f"{settings.ollama_base_url}/api/generate", json=payload, timeout=60.0)
+                    resp.raise_for_status()
+                    raw_response = resp.json().get("response", "{}")
+                    result = _parse_json(raw_response)
+                    logger.info(f"[virality] scene {scene.scene_index} scored via Local LLM ({settings.llm_model})")
+                except Exception as e:
+                    logger.error(f"[virality] Local LLM failed: {e}")
+                    raise e
 
-            prompt = SCORE_PROMPT.format(
-                duration=scene.duration_sec,
-                transcript=transcript[:1500],   # token budget
-            )
-            response = model.generate_content(prompt)
-            result = _parse_json(response.text)
-            score = max(0, min(100, int(result.get("score", 0))))
+            # --- Path B: Gemini (Cloud API) ---
+            elif settings.gemini_api_key and settings.gemini_api_key != "your_gemini_api_key_here":
+                genai.configure(api_key=settings.gemini_api_key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                prompt = SCORE_PROMPT.format(duration=scene.duration_sec, transcript=transcript[:1500])
+                response = model.generate_content(prompt)
+                result = _parse_json(response.text)
+                logger.info(f"[virality] scene {scene.scene_index} scored via Gemini")
+            
+            else:
+                raise ValueError("No valid AI provider configured (Gemini or Local LLM)")
 
-            scene.virality_score = score
-            # Store hook + title in the scene for later use
-            scene.transcript_segment = json.dumps({
-                "text": transcript,
-                "hook": result.get("hook", ""),
-                "reasoning": result.get("reasoning", ""),
-                "suggested_title": result.get("suggested_title", ""),
-            })
-            db.commit()
-            scored.append((scene, score))
-            logger.debug(f"  scene {scene.scene_index} score={score}")
+            if result:
+                score = max(0, min(100, int(result.get("score", 0))))
+                scene.virality_score = score
+                scene.transcript_segment = json.dumps({
+                    "text": transcript,
+                    "hook": result.get("hook", ""),
+                    "reasoning": result.get("reasoning", ""),
+                    "suggested_title": result.get("suggested_title", ""),
+                })
+                db.commit()
+                scored.append((scene, score))
+                logger.debug(f"  scene {scene.scene_index} score={score}")
 
         except Exception as e:
-            logger.warning(f"[virality] scene {scene.id} Gemini failed ({e}), falling back to open-source heuristic algorithm")
+            logger.warning(f"[virality] AI scoring failed ({e}), falling back to heuristic")
             
-            # --- OPEN SOURCE HEURISTIC FALLBACK (No API needed, 0MB RAM) ---
-            score = 50 # Base score
+            # --- Path C: Heuristic Fallback (No AI) ---
+            score = 50 
+            if 15 <= scene.duration_sec <= 40: score += 20
+            elif scene.duration_sec > 60 or scene.duration_sec < 5: score -= 20
             
-            # 1. Duration check (sweet spot is 15-40 seconds)
-            if 15 <= scene.duration_sec <= 40:
-                score += 20
-            elif scene.duration_sec > 60 or scene.duration_sec < 5:
-                score -= 20
-                
-            # 2. Keyword density (buzzwords that indicate high engagement)
-            viral_keywords = ["crazy", "wow", "wait", "look", "how to", "secret", "never", "always", "best", "worst", "omg", "hack", "trick"]
-            lower_transcript = transcript.lower()
-            keyword_hits = sum(1 for word in viral_keywords if word in lower_transcript)
+            viral_keywords = ["crazy", "wow", "wait", "look", "secret", "never", "always", "best", "worst", "omg", "hack", "trick"]
+            keyword_hits = sum(1 for word in viral_keywords if word in transcript.lower())
             score += (keyword_hits * 5)
             
             score = max(0, min(100, score))
-            
             scene.virality_score = score
             scene.transcript_segment = json.dumps({
                 "text": transcript,
                 "hook": f"Watch what happens in this {int(scene.duration_sec)}s clip!",
-                "reasoning": "Selected using open-source heuristic transcript analysis.",
+                "reasoning": "Heuristic fallback analysis.",
                 "suggested_title": f"Viral Moment #{scene.scene_index + 1}",
             })
             db.commit()
             scored.append((scene, score))
 
-    # ── Select top scenes above threshold ─────────────────────────────
     scored.sort(key=lambda x: x[1], reverse=True)
-    selected = [
-        s for s, score in scored
-        if score >= settings.virality_threshold
-    ][:5]   # max 5 clips per video
+    selected = [s for s, score in scored if score >= settings.virality_threshold][:5]
 
     for s in selected:
         s.selected_for_clip = True
     db.commit()
 
-    logger.info(
-        f"[virality] job={job_id} scored={len(scored)} "
-        f"selected={len(selected)} threshold={settings.virality_threshold}"
-    )
     return {**ctx, "selected_scene_ids": [s.id for s in selected]}
 
 
 def _parse_json(text: str) -> dict:
-    """Robustly extract JSON from LLM response (strips markdown fences if present)."""
     text = text.strip()
-    # Strip ```json ... ``` fences
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if match:
         text = match.group(1)
-    # Try direct parse
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Last resort — find first { ... }
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
-            return json.loads(m.group())
+            try: return json.loads(m.group())
+            except: pass
     return {"score": 0}

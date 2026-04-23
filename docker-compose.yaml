@@ -1,5 +1,4 @@
-# docker-compose.yaml — optimized for 8GB RAM
-
+# docker-compose.yaml — optimized for 8GB RAM + Local LLM
 services:
   # ── MinIO — local S3-compatible object storage ──────────────────
   minio:
@@ -34,6 +33,17 @@ services:
       interval: 5s
       retries: 5
 
+  # ── Ollama — Local LLM ───────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: veda_ollama
+    mem_limit: 1g
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
   # ── FastAPI Backend ──────────────────────────────────────────────
   backend:
     build: ./backend
@@ -45,6 +55,8 @@ services:
       MINIO_ENDPOINT: minio:9000
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:///./veda.db
+      OLLAMA_BASE_URL: http://ollama:11434
+      USE_LOCAL_LLM: "true"
     ports:
       - "8000:8000"
     depends_on:
@@ -62,13 +74,15 @@ services:
     build: ./backend
     container_name: veda_worker
     command: celery -A worker.celery_app worker --loglevel=info --concurrency=1
-    mem_limit: 2g
+    mem_limit: 4g
     env_file: .env
     environment:
       PYTHONPATH: /app
       MINIO_ENDPOINT: minio:9000
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:///./veda.db
+      OLLAMA_BASE_URL: http://ollama:11434
+      USE_LOCAL_LLM: "true"
     depends_on:
       minio:
         condition: service_healthy
@@ -96,3 +110,4 @@ services:
 
 volumes:
   minio_data:
+  ollama_data:

@@ -42,6 +42,27 @@ def get_client():
     return _client
 
 
+_public_client = None
+
+
+def get_public_client():
+    """Returns a client configured with the public URL for presigned generation."""
+    global _public_client
+    if _public_client is None:
+        if settings.minio_public_url:
+            _public_client = boto3.client(
+                "s3",
+                endpoint_url=settings.minio_public_url,
+                aws_access_key_id=settings.minio_access_key,
+                aws_secret_access_key=settings.minio_secret_key,
+                config=BotoConfig(signature_version="s3v4"),
+                region_name="us-east-1",
+            )
+        else:
+            _public_client = get_client()
+    return _public_client
+
+
 def ensure_bucket():
     """Create the bucket if it doesn't already exist."""
     client = get_client()
@@ -90,7 +111,7 @@ def upload_bytes(data: bytes, object_key: str, content_type: str = "application/
 
 def get_presigned_url(object_key: str, expires_in: int = 3600) -> str:
     """Generate a pre-signed URL for temporary public access."""
-    client = get_client()
+    client = get_public_client()
     return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.minio_bucket, "Key": object_key},
