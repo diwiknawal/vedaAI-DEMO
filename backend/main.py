@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from config import settings
 from database import init_db
+from storage.minio_client import ensure_bucket
 from routers import upload, jobs, clips
 
 
@@ -16,6 +17,7 @@ async def lifespan(app: FastAPI):
     # Startup
     settings.ensure_dirs()
     init_db()
+    ensure_bucket()
     yield
     # Shutdown (nothing to clean up for now)
 
