@@ -13,8 +13,8 @@ export default function App() {
       {/* Navbar */}
       <nav className="navbar">
         <Link to="/" className="navbar-brand">
-          <span className="logo-icon">⚡</span>
-          Veda AI
+          <span className="logo-icon"></span>
+          Veda Hub
         </Link>
         <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
           <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
