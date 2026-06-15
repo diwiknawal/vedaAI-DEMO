@@ -38,8 +38,8 @@ services:
     image: ollama/ollama:latest
     container_name: veda_ollama
     mem_limit: 1g
-    ports:
-      - "11434:11434"
+#    ports:
+#      - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
